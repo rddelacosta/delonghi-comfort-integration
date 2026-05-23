@@ -20,11 +20,11 @@ from .const import DOMAIN, PRESET_REAL_FEEL
 
 _LOGGER = logging.getLogger(__name__)
 
-# Mode mappings confirmed via live property dump of PAC-EL112 (AC000W021906461).
-# get_device_mode: 3=Fan observed; 1=Cool and 2=Dry from integration source.
-# Real Feel is NOT a separate mode value -- implemented as a preset per HA guidelines.
-# Context7/HA dev docs: "only built-in HVACMode values allowed; custom modes go in presets."
-# If testing reveals a mode 4, update DEVICE_MODE_TO_HVAC accordingly.
+# Mode mappings confirmed via live property dump + live device testing (PAC-EL112).
+# Confirmed values: 1=Cool, 2=Dry, 3=Fan, 4=Real Feel.
+# Mode 4 (Real Feel) is NOT in this map -- it is exposed as a preset_mode per HA
+# guidelines (only built-in HVACMode enum values are allowed as HVAC modes).
+# Real Feel behaves as comfort-assisted cooling and is set via set_device_mode=4.
 DEVICE_MODE_TO_HVAC: dict[int, HVACMode] = {
     1: HVACMode.COOL,
     2: HVACMode.DRY,
@@ -59,7 +59,7 @@ class DeLonghiClimate(CoordinatorEntity, ClimateEntity):
     """Representation of a De'Longhi portable AC (PAC series)."""
 
     _attr_has_entity_name = True
-    _attr_name = None  # use device name from device_info
+    _attr_name = None
 
     def __init__(self, coordinator) -> None:
         """Initialize the climate entity."""
@@ -85,23 +85,16 @@ class DeLonghiClimate(CoordinatorEntity, ClimateEntity):
             HVACMode.FAN_ONLY,
         ]
 
-        # Real Feel is a preset on top of Cool mode -- HA guidelines require
-        # only built-in HVACMode values; custom modes go in presets.
+        # Real Feel (mode 4) exposed as a preset -- HA requires built-in HVACMode only.
         self._attr_preset_modes = [PRESET_NONE, PRESET_REAL_FEEL]
 
         self._attr_fan_modes = ["auto", "low", "medium", "high"]
 
         self._attr_temperature_unit = UnitOfTemperature.CELSIUS
-        self._attr_min_temp = 16   # PAC-EL112 minimum (set_temp_setpoint min)
+        self._attr_min_temp = 16
         self._attr_max_temp = 32
         self._attr_target_temperature_step = 1.0
         self._attr_precision = 1.0
-
-        # Real Feel active state tracked locally -- the device exposes no dedicated
-        # read-back property for "Real Feel enabled". get_real_feel_offset is always
-        # 16 on this device regardless of mode, so it cannot be used as a signal.
-        # None = unknown (cold start / HA restart); True/False = user-set this session.
-        self._real_feel_active: bool | None = None
 
         self._attr_device_info = {
             "identifiers": {(DOMAIN, self._dsn)},
@@ -121,10 +114,14 @@ class DeLonghiClimate(CoordinatorEntity, ClimateEntity):
 
     @property
     def hvac_mode(self) -> HVACMode:
-        """Return current HVAC mode."""
+        """Return current HVAC mode. Mode 4 (Real Feel) maps to OFF here; use preset_mode."""
         if self.coordinator.data.get("get_device_status") == 2:
             return HVACMode.OFF
         device_mode = self.coordinator.data.get("get_device_mode")
+        # Mode 4 = Real Feel: device is ON but mode is not in standard map.
+        # Return COOL as the underlying operating mode (Real Feel is cooling-based).
+        if device_mode == 4:
+            return HVACMode.COOL
         return DEVICE_MODE_TO_HVAC.get(device_mode, HVACMode.OFF)
 
     @property
@@ -137,21 +134,23 @@ class DeLonghiClimate(CoordinatorEntity, ClimateEntity):
             1: HVACAction.COOLING,
             2: HVACAction.DRYING,
             3: HVACAction.FAN,
+            4: HVACAction.COOLING,  # Real Feel is comfort-assisted cooling
         }.get(device_mode, HVACAction.IDLE)
 
     @property
     def preset_mode(self) -> str | None:
         """Return the current preset mode.
 
-        Tracked via local optimistic state (_real_feel_active) because the device
-        exposes no authoritative read-back property for Real Feel activation.
-        Returns None on cold start (HA restart) until user explicitly sets a preset.
+        Reads get_device_mode == 4 authoritatively from device data.
+        No local state tracking needed -- mode 4 is confirmed as a true device mode.
+        Preset is readable while device is off (reflects remembered configuration).
         """
-        if self._real_feel_active is True:
+        device_mode = self.coordinator.data.get("get_device_mode")
+        if device_mode == 4:
             return PRESET_REAL_FEEL
-        if self._real_feel_active is False:
+        if device_mode in (1, 2, 3):
             return PRESET_NONE
-        return None  # Unknown -- cold start, no user action yet this session
+        return None  # Unknown / unavailable
 
     @property
     def current_temperature(self) -> float | None:
@@ -213,40 +212,26 @@ class DeLonghiClimate(CoordinatorEntity, ClimateEntity):
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set preset mode.
 
-        PRESET_REAL_FEEL: ensures Cool mode, then writes the Real Feel offset
-        to activate comfort-sensor mode. Offset is preserved from last known
-        value (default 16 if unavailable).
+        PRESET_REAL_FEEL: turns on device if needed, then sends set_device_mode=4.
+        Mode 4 confirmed via live device test (device_mode went to 'unknown' in
+        sensor when Real Feel activated via De'Longhi app, mapping to unmapped int=4).
 
-        PRESET_NONE: writes offset=0 as best-effort disable (unverified on
-        firmware -- needs live testing to confirm). Tracks state locally.
-
-        State is optimistic (local only). On HA restart _real_feel_active
-        resets to None (unknown) since the device has no read-back property.
+        PRESET_NONE: sends set_device_mode=1 (Cool) to exit Real Feel.
         """
         if preset_mode == PRESET_REAL_FEEL:
             if self.coordinator.data.get("get_device_status") == 2:
                 if not await self._api.set_device_status(self._dsn, 1):
                     _LOGGER.error("Failed to turn on device for Real Feel preset")
                     return
-            if self.hvac_mode != HVACMode.COOL:
-                if not await self._api.set_device_mode(self._dsn, 1):
-                    _LOGGER.error("Failed to set Cool mode for Real Feel preset")
-                    return
-            offset = self.coordinator.data.get("get_real_feel_offset") or 16
-            if not await self._api.set_real_feel_offset(self._dsn, int(offset)):
-                _LOGGER.error("Failed to set Real Feel offset on %s", self._dsn)
+            if not await self._api.set_device_mode(self._dsn, 4):
+                _LOGGER.error("Failed to set Real Feel (mode 4) on %s", self._dsn)
                 return
-            self._real_feel_active = True
 
         elif preset_mode == PRESET_NONE:
-            # Best-effort disable: write offset=0. Not empirically confirmed --
-            # update this once tested on live device.
-            if not await self._api.set_real_feel_offset(self._dsn, 0):
-                _LOGGER.warning(
-                    "Failed to clear Real Feel offset on %s -- state set locally",
-                    self._dsn,
-                )
-            self._real_feel_active = False
+            # Exit Real Feel by switching to Cool (mode 1)
+            if not await self._api.set_device_mode(self._dsn, 1):
+                _LOGGER.error("Failed to exit Real Feel on %s", self._dsn)
+                return
 
         else:
             raise ValueError(f"Unsupported preset mode: {preset_mode!r}")
