@@ -20,17 +20,18 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 # Switch descriptions for AC (PAC series).
-# Each entry maps a get_* read property to the corresponding set_* write property.
-# Confirmed present on PAC-EL112 via property dump (AC000W021906461).
+# Using name= directly instead of translation_key= to avoid fallback to device name
+# when translation strings are missing (personal fork, no translations/en.json entries).
+# Confirmed properties present on PAC-EL112 via property dump (AC000W021906461).
 AC_SWITCH_DESCRIPTIONS: tuple[SwitchEntityDescription, ...] = (
     SwitchEntityDescription(
         key="get_silent_function",
-        translation_key="silent_mode",
+        name="Silent mode",
         icon="mdi:volume-mute",
     ),
     SwitchEntityDescription(
         key="get_swing_function",
-        translation_key="swing",
+        name="Swing",
         icon="mdi:arrow-oscillating",
     ),
 )
