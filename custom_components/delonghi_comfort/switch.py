@@ -20,10 +20,15 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 # Switch descriptions for AC (PAC series).
-# Using name= directly instead of translation_key= to avoid fallback to device name
-# when translation strings are missing (personal fork, no translations/en.json entries).
-# Confirmed properties present on PAC-EL112 via property dump (AC000W021906461).
+# Using name= directly (not translation_key=) to avoid fallback to device name.
+# device_status uses 1=ON / 2=OFF — NOT a standard boolean.
+# Silent and swing use 0=OFF / 1=ON — standard boolean.
 AC_SWITCH_DESCRIPTIONS: tuple[SwitchEntityDescription, ...] = (
+    SwitchEntityDescription(
+        key="get_device_status",
+        name="Power",
+        icon="mdi:power",
+    ),
     SwitchEntityDescription(
         key="get_silent_function",
         name="Silent mode",
@@ -35,12 +40,6 @@ AC_SWITCH_DESCRIPTIONS: tuple[SwitchEntityDescription, ...] = (
         icon="mdi:arrow-oscillating",
     ),
 )
-
-# Map from get_* key to the corresponding set_* property name
-_SET_PROPERTY: dict[str, str] = {
-    "get_silent_function": "set_silent_function",
-    "get_swing_function":  "set_swing_function",
-}
 
 HEATER_SWITCH_DESCRIPTIONS: tuple[SwitchEntityDescription, ...] = (
     SwitchEntityDescription(
@@ -81,7 +80,7 @@ async def async_setup_entry(
 
 
 class DeLonghiSwitch(CoordinatorEntity, SwitchEntity):
-    """A boolean switch for De'Longhi AC features (silent, swing)."""
+    """A boolean switch for De'Longhi AC features."""
 
     _attr_has_entity_name = True
 
@@ -104,10 +103,16 @@ class DeLonghiSwitch(CoordinatorEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool | None:
-        """Return True if the switch is on. Device uses 1=on, 0=off for boolean props."""
+        """Return True if switch is on.
+
+        device_status: 1=ON, 2=OFF (not a standard boolean — bool(2) would be True).
+        silent/swing: 0=OFF, 1=ON (standard boolean).
+        """
         value = self.coordinator.data.get(self.entity_description.key)
         if value is None:
             return None
+        if self.entity_description.key == "get_device_status":
+            return value == 1
         return bool(value)
 
     @property
@@ -147,17 +152,13 @@ class DeLonghiSwitch(CoordinatorEntity, SwitchEntity):
         dsn = self.coordinator.dsn
         key = self.entity_description.key
 
+        if key == "get_device_status":
+            # device_status: 1=ON, 2=OFF
+            return await self.coordinator.api.set_device_status(dsn, 1 if enabled else 2)
         if key == "get_silent_function":
             return await self.coordinator.api.set_silent_mode(dsn, enabled)
         if key == "get_swing_function":
             return await self.coordinator.api.set_swing(dsn, enabled)
-
-        # Fallback: use generic property setter with the set_* property name
-        prop = _SET_PROPERTY.get(key)
-        if prop:
-            return await self.coordinator.api.set_device_property(
-                dsn, prop, 1 if enabled else 0
-            )
 
         _LOGGER.warning("No API handler for switch key: %s", key)
         return False
