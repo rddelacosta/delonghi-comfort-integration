@@ -38,8 +38,8 @@ class DeLonghiAPI:
         self.password = password
         self.language = language
         self.session = session
-        self.access_token = None
-        self.refresh_token = None
+        self.access_token: str | None = None
+        self.refresh_token: str | None = None
 
     def get_query_param(self, url: str, param: str) -> str | None:
         """Extract query parameter from URL."""
@@ -63,9 +63,8 @@ class DeLonghiAPI:
     async def _get_new_access_token(self) -> str | None:
         """Get a new access token through the full authentication flow."""
 
-        
-        # Thanks to https://github.com/duckwc/ECAMpy for the code to token convertion
-        # Thanks to https://github.com/rtfpessoa/delonghi-comfort-client, for the cli code to implement the authentication flow
+        # Thanks to https://github.com/duckwc/ECAMpy for the code to token conversion
+        # Thanks to https://github.com/rtfpessoa/delonghi-comfort-client for the auth flow
         try:
             # Step 1: Start authentication process
             async with self.session.get(
@@ -305,13 +304,11 @@ class DeLonghiAPI:
                     data = await response.json()
                     new_access_token = data["access_token"]
                     new_refresh_token = data.get("refresh_token")
-
                     if new_refresh_token:
                         self.refresh_token = new_refresh_token
-
                     return new_access_token
 
-                _LOGGER.warning("Failed to refresh token, falling back to login")
+                _LOGGER.warning("Failed to refresh token, falling back to full login")
                 return await self._get_new_access_token()
 
         except Exception as e:
@@ -323,7 +320,6 @@ class DeLonghiAPI:
         if not self.access_token:
             if not await self.authenticate():
                 return []
-
         try:
             response = await self._get_request("apiv1/devices.json")
             return response if isinstance(response, list) else []
@@ -331,12 +327,11 @@ class DeLonghiAPI:
             _LOGGER.error("Failed to get devices: %s", e)
             return []
 
-    async def get_device_properties(self, dsn: str) -> dict[str, Any]:
+    async def get_device_properties(self, dsn: str) -> list[dict[str, Any]]:
         """Get device properties by DSN."""
         if not self.access_token:
             if not await self.authenticate():
-                return {}
-
+                return []
         try:
             response = await self._get_request(f"apiv1/dsns/{dsn}/properties.json")
             return response if isinstance(response, list) else []
@@ -353,80 +348,75 @@ class DeLonghiAPI:
                 return prop["property"]["value"]
         return None
 
+    # -------------------------------------------------------------------------
+    # Device control methods — all use set_device_* property names confirmed
+    # via live property dump of PAC-EL112 (DSN AC000W021906461).
+    # -------------------------------------------------------------------------
+
+    async def set_device_status(self, dsn: str, status: int) -> bool:
+        """Set device on/off status. status: 1=ON, 2=OFF."""
+        return await self._set_datapoint(dsn, "set_device_status", int(status))
+
     async def set_device_mode(self, dsn: str, mode: int) -> bool:
-        """Set device mode (1=Cooling, 2=Dehumidification, 3=Fan)."""
-        try:
-            response = await self._post_request(
-                f"apiv1/dsns/{dsn}/properties/set_device_mode/datapoints.json",
-                {"datapoint": {"value": mode}},
-            )
-            return response is not None
-        except Exception as e:
-            _LOGGER.error("Failed to set device mode for %s: %s", dsn, e)
-            return False
+        """Set device mode. mode: 1=Cool, 2=Dry, 3=Fan."""
+        return await self._set_datapoint(dsn, "set_device_mode", int(mode))
 
     async def set_temperature_setpoint(self, dsn: str, temperature: float) -> bool:
-        """Set temperature setpoint (16-32°C)."""
-        try:
-            response = await self._post_request(
-                f"apiv1/dsns/{dsn}/properties/set_temp_setpoint/datapoints.json",
-                {"datapoint": {"value": temperature}},
-            )
-            return response is not None
-        except Exception as e:
-            _LOGGER.error("Failed to set temperature setpoint for %s: %s", dsn, e)
-            return False
-
-    async def set_status(self, dsn: str, status: int) -> bool:
-        """Set device status (1=ON, 2=OFF)."""
-        try:
-            response = await self._post_request(
-                f"apiv1/dsns/{dsn}/properties/set_status/datapoints.json",
-                {"datapoint": {"value": status}},
-            )
-            return response is not None
-        except Exception as e:
-            _LOGGER.error("Failed to set status for %s: %s", dsn, e)
-            return False
-
-    async def set_silent_mode(self, dsn: str, status: int) -> bool:
-        """Set silent mode (1=ON, 2=OFF)."""
-        try:
-            response = await self._post_request(
-                f"apiv1/dsns/{dsn}/properties/set_silent_function/datapoints.json",
-                {"datapoint": {"value": status}},
-            )
-            return response is not None
-        except Exception as e:
-            _LOGGER.error("Failed to set silent mode for %s: %s", dsn, e)
-            return False
-
-    async def set_humidity_setpoint(self, dsn: str, humidity: int) -> bool:
-        """Set humidity setpoint (0-100%)."""
-        try:
-            response = await self._post_request(
-                f"apiv1/dsns/{dsn}/properties/humidity_setpoint/datapoints.json",
-                {"datapoint": {"value": humidity}},
-            )
-            return response is not None
-        except Exception as e:
-            _LOGGER.error("Failed to set humidity setpoint for %s: %s", dsn, e)
-            return False
+        """Set temperature setpoint (16-32 degC)."""
+        return await self._set_datapoint(dsn, "set_temp_setpoint", float(temperature))
 
     async def set_fan_speed(self, dsn: str, fan_speed: int) -> bool:
-        """Set fan speed (1=Low, 2=Mid, 3=High, 4=Auto)."""
+        """Set fan speed. fan_speed: 1=Low, 2=Mid, 3=High, 4=Auto."""
+        # NOTE: must send int, not str -- confirmed from property dump (base_type=integer)
+        return await self._set_datapoint(dsn, "set_int_fan_speed", int(fan_speed))
+
+    async def set_silent_mode(self, dsn: str, enabled: bool) -> bool:
+        """Enable or disable silent function."""
+        return await self._set_datapoint(
+            dsn, "set_silent_function", 1 if enabled else 0
+        )
+
+    async def set_swing(self, dsn: str, enabled: bool) -> bool:
+        """Enable or disable swing/oscillation function."""
+        return await self._set_datapoint(
+            dsn, "set_swing_function", 1 if enabled else 0
+        )
+
+    async def set_real_feel_offset(self, dsn: str, offset: int) -> bool:
+        """Set the Real Feel temperature offset (typically 0-30).
+
+        The Real Feel feature uses both room_temp and second_room_temp
+        (CST sensor) to calculate a perceived-comfort temperature.
+        Writing to set_real_feel_offset activates/adjusts this mode.
+        Default observed value on PAC-EL112: 16.
+        Writing 0 is used as best-effort disable (needs live verification).
+        """
+        return await self._set_datapoint(dsn, "set_real_feel_offset", int(offset))
+
+    async def set_device_property(self, dsn: str, prop_name: str, value: Any) -> bool:
+        """Generic property setter -- use for heater or future properties."""
+        return await self._set_datapoint(dsn, prop_name, value)
+
+    # -------------------------------------------------------------------------
+    # Internal helpers
+    # -------------------------------------------------------------------------
+
+    async def _set_datapoint(self, dsn: str, prop_name: str, value: Any) -> bool:
+        """Post a datapoint to a single device property."""
         try:
             response = await self._post_request(
-                f"apiv1/dsns/{dsn}/properties/set_int_fan_speed/datapoints.json",
-                {"datapoint": {"value": str(fan_speed)}},
+                f"apiv1/dsns/{dsn}/properties/{prop_name}/datapoints.json",
+                {"datapoint": {"value": value}},
             )
             return response is not None
         except Exception as e:
-            _LOGGER.error("Failed to set fan speed for %s: %s", dsn, e)
+            _LOGGER.error(
+                "Failed to set %s=%s on %s: %s", prop_name, value, dsn, e
+            )
             return False
 
-    async def _get_request(self, path: str) -> dict[str, Any] | None:
-        """Make a GET request to the API."""
+    async def _get_request(self, path: str) -> Any | None:
+        """Make an authenticated GET request to the Ayla EU endpoint."""
         url = f"https://ads-eu.aylanetworks.com/{path}"
         headers = {
             "User-Agent": API_USER_AGENT,
@@ -439,23 +429,21 @@ class DeLonghiAPI:
                 response.raise_for_status()
                 return await response.json()
         except aiohttp.ClientResponseError as e:
-            if e.status == 401:  # Unauthorized
-                # Try to refresh token and retry
+            if e.status == 401:
                 self.access_token = await self.refresh_access_token()
                 if self.access_token:
                     headers["Authorization"] = f"auth_token {self.access_token}"
                     async with self.session.get(url, headers=headers) as response:
                         response.raise_for_status()
                         return await response.json()
+            _LOGGER.error("GET %s failed: %s", path, e)
             return None
         except Exception as e:
-            _LOGGER.error("GET request failed for %s: %s", path, e)
+            _LOGGER.error("GET %s failed: %s", path, e)
             return None
 
-    async def _post_request(
-        self, path: str, data: dict[str, Any]
-    ) -> dict[str, Any] | None:
-        """Make a POST request to the API."""
+    async def _post_request(self, path: str, data: dict[str, Any]) -> Any | None:
+        """Make an authenticated POST request to the Ayla EU endpoint."""
         url = f"https://ads-eu.aylanetworks.com/{path}"
         headers = {
             "User-Agent": API_USER_AGENT,
@@ -468,8 +456,7 @@ class DeLonghiAPI:
                 response.raise_for_status()
                 return await response.json()
         except aiohttp.ClientResponseError as e:
-            if e.status == 401:  # Unauthorized
-                # Try to refresh token and retry
+            if e.status == 401:
                 self.access_token = await self.refresh_access_token()
                 if self.access_token:
                     headers["Authorization"] = f"auth_token {self.access_token}"
@@ -478,32 +465,8 @@ class DeLonghiAPI:
                     ) as response:
                         response.raise_for_status()
                         return await response.json()
+            _LOGGER.error("POST %s failed: %s", path, e)
             return None
         except Exception as e:
-            _LOGGER.error("POST request failed for %s: %s", path, e)
+            _LOGGER.error("POST %s failed: %s", path, e)
             return None
-
-    async def set_device_status(self, dsn: str, status: int) -> bool:
-        """Set device status (1=ON, 2=OFF)."""
-        try:
-            response = await self._post_request(
-                f"apiv1/dsns/{dsn}/properties/set_device_status/datapoints.json",
-                {"datapoint": {"value": str(status)}},
-            )
-        except aiohttp.ClientError as e:
-            _LOGGER.error("Failed to set device status for %s: %s", dsn, e)
-            return False
-        else:
-            return response is not None
-
-    async def set_device_property(self, dsn: str, propName: str, value: Any) -> bool:
-        """Set a device property by DSN and property name."""
-        try:
-            response = await self._post_request(
-                f"apiv1/dsns/{dsn}/properties/{propName}/datapoints.json",
-                {"datapoint": {"value": value}},
-            )
-            return response is not None
-        except Exception as e:
-            _LOGGER.error("Failed to set device property: %s, %s, %s: %s", dsn, propName, value, e)
-            return False

@@ -260,3 +260,9 @@ DEFAULT_LANGUAGE = "en"
 
 # Update intervals
 SCAN_INTERVAL = 5  # seconds
+
+# Preset mode for Real Feel (EcoRealFeel) comfort mode.
+# Real Feel is not a separate HVAC mode -- implemented as a climate preset
+# per HA developer guidelines (only built-in HVACMode enum values are allowed).
+# PRESET_NONE is imported directly from homeassistant.components.climate.
+PRESET_REAL_FEEL = "real_feel"
